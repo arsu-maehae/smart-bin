@@ -35,7 +35,7 @@ PubSubClient client(espClient);
 #define TFT_DC   2
 #define TFT_RST  4
 
-// --- ขา I2C ที่เราย้ายใหม่ ---
+// --- ขา I2C  ---
 #define I2C_SDA 25
 #define I2C_SCL 26
 
@@ -120,8 +120,8 @@ void loop() {
   if (!client.connected()) { reconnect(); }
   client.loop();
 
-  // 1. ตรวจสอบข้อมูลทุก 5 วินาที
-  if (millis() - lastMeasureTime > 5000) {
+  // 1. ตรวจสอบข้อมูลทุก 1 วินาที
+  if (millis() - lastMeasureTime > 3000) {
     lastMeasureTime = millis();
     
     // --- อ่านค่าขยะ ---
@@ -140,9 +140,9 @@ void loop() {
     float p = bmp.readPressure() / 100.0F; // ความดัน (hPa)
     
     // --- ส่งข้อมูลขึ้น MQTT แบบเหมาเข่ง ---
-    client.publish("smartbin/level", String(percent).c_str());
-    client.publish("smartbin/temp", String(t).c_str());
-    client.publish("smartbin/humidity", String(h).c_str());
+    client.publish("smartbin/fleet/1/level", String(percent).c_str());
+    client.publish("smartbin/fleet/1/temp", String(t).c_str());
+    client.publish("smartbin/fleet/1/humidity", String(h).c_str());
 
     // --- อัปเดตหน้าจอสถานะปกติ (แนวนอน) ---
     if (!isBinFull) {
@@ -210,7 +210,7 @@ void loop() {
 
     if (percent > 80 && !isBinFull) {
       isBinFull = true;
-      client.publish("smartbin/alert", "FULL"); 
+      client.publish("smartbin/fleet/1/alert", "FULL");
       
       tft.fillScreen(ST77XX_RED);
       tft.setTextColor(ST77XX_WHITE);
@@ -237,7 +237,7 @@ void loop() {
     cardUID.trim(); 
 
     if (cardUID.equalsIgnoreCase(knownCard)) {
-      client.publish("smartbin/worker", "Arsu Maehae acknowledged the task");
+      client.publish("smartbin/fleet/1/worker", "Arsu Maehae");
       isBinFull = false; 
       
       tft.fillScreen(ST77XX_GREEN);

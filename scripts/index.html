@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Bin System - Dashboard</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.1/mqttws31.js" type="text/javascript"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;600&display=swap');
+
+        :root {
+            --bg-main: #14141f;
+            --bg-card: #202033;
+            --border-card: #3a3a5c;
+            --text-main: #ffffff;
+            --text-muted: #9ba0b4;
+            --color-green: #4caf50;
+            --color-red: #ff4c4c;
+            --color-orange: #ffb74d;
+            --color-blue: #4fc3f7;
+            --bar-bg: #2d2d46;
+            --bar-fill: #cfd8dc;
+        }
+
+        body {
+            font-family: 'Kanit', sans-serif;
+            background-color: var(--bg-main);
+            color: var(--text-main);
+            margin: 0;
+            padding: 20px 40px;
+        }
+
+        /* --- Header --- */
+        .top-navbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--border-card);
+            padding-bottom: 15px;
+            margin-bottom: 30px;
+        }
+        .logo-title {
+            font-size: 28px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .user-profile {
+            font-size: 14px;
+            color: var(--text-muted);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .online-dot { color: var(--color-green); }
+
+        /* --- Grid Layout 2x2 --- */
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 30px;
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+
+        /* --- Card Design --- */
+        .bin-card {
+            background-color: var(--bg-card);
+            border: 2px solid var(--border-card);
+            border-radius: 16px;
+            padding: 25px;
+            box-shadow: 0 8px 20px rgba(0,0,0,0.4);
+            transition: all 0.3s ease;
+        }
+        .bin-card:hover {
+            border-color: #555588;
+            box-shadow: 0 8px 25px rgba(0,0,0,0.6);
+        }
+
+        .card-header {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .card-title {
+            font-size: 32px;
+            font-weight: 600;
+            margin: 0 0 5px 0;
+        }
+        .card-status {
+            font-size: 14px;
+            color: var(--color-green);
+            font-weight: 400;
+        }
+        .status-alert { color: var(--color-red); animation: blink 1s infinite alternate; }
+
+        /* --- Data Rows --- */
+        .data-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 15px;
+            font-size: 20px;
+        }
+        .data-label {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: var(--text-main);
+        }
+        .data-value { font-weight: 600; }
+        .val-temp { color: var(--color-orange); }
+        .val-humid { color: var(--color-blue); }
+
+        /* --- Progress Bar --- */
+        .level-container {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            margin-top: 10px;
+            margin-bottom: 20px;
+            padding-left: 35px; /* Indent under icon */
+        }
+        .level-text { font-size: 22px; font-weight: 600; width: 50px;}
+        .progress-bg {
+            flex-grow: 1;
+            height: 18px;
+            background-color: var(--bar-bg);
+            border-radius: 10px;
+            overflow: hidden;
+            border: 1px solid #444466;
+        }
+        .progress-fill {
+            height: 100%;
+            background-color: var(--bar-fill);
+            width: 0%;
+            transition: width 0.5s ease;
+        }
+        .fill-danger { background-color: var(--color-red); }
+
+        /* --- Logs --- */
+        .logs-section {
+            max-width: 1000px;
+            margin: 40px auto;
+        }
+        .logs-title {
+            text-align: center;
+            font-size: 18px;
+            color: var(--text-main);
+            margin-bottom: 15px;
+        }
+        .log-box {
+            background-color: #05050a;
+            border: 1px solid #222;
+            border-radius: 8px;
+            padding: 15px;
+            height: 150px;
+            overflow-y: auto;
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 13px;
+            color: var(--color-green);
+        }
+        .log-alert { color: var(--color-red); }
+        .log-worker { color: var(--color-orange); }
+
+        @keyframes blink { from { opacity: 1; } to { opacity: 0.5; } }
+    </style>
+</head>
+<body>
+
+    <div class="top-navbar">
+        <div class="logo-title">
+            🗑️ Smart Bin System
+        </div>
+        <div class="user-profile">
+            Arsu Maehae | Online <span class="online-dot" id="conn-status">🟢</span>
+        </div>
+    </div>
+
+    <div class="dashboard-grid">
+        
+        <div class="bin-card" id="card-1">
+            <div class="card-header">
+                <h2 class="card-title">ถังที่ 1</h2>
+                <div class="card-status" id="bin1-status">📡 Status: NORMAL</div>
+            </div>
+            <div class="data-row">
+                <div class="data-label">🗑️ ปริมาณขยะ</div>
+            </div>
+            <div class="level-container">
+                <div class="level-text" id="bin1-level-txt">--%</div>
+                <div class="progress-bg"><div class="progress-fill" id="bin1-bar"></div></div>
+                <div style="color: var(--text-muted);">%</div>
+            </div>
+            <div class="data-row">
+                <div class="data-label">🌡️ อุณหภูมิ</div>
+                <div class="data-value val-temp" id="bin1-temp">-- °C</div>
+            </div>
+            <div class="data-row">
+                <div class="data-label">💧 ความชื้น</div>
+                <div class="data-value val-humid" id="bin1-humid">-- %</div>
+            </div>
+        </div>
+
+        <div class="bin-card" id="card-2">
+            <div class="card-header">
+                <h2 class="card-title">ถังที่ 2</h2>
+                <div class="card-status" id="bin2-status">📡 Status: NORMAL</div>
+            </div>
+            <div class="data-row">
+                <div class="data-label">🗑️ ปริมาณขยะ</div>
+            </div>
+            <div class="level-container">
+                <div class="level-text" id="bin2-level-txt">--%</div>
+                <div class="progress-bg"><div class="progress-fill" id="bin2-bar"></div></div>
+                <div style="color: var(--text-muted);">%</div>
+            </div>
+            <div class="data-row">
+                <div class="data-label">🌡️ อุณหภูมิ</div>
+                <div class="data-value val-temp" id="bin2-temp">-- °C</div>
+            </div>
+            <div class="data-row">
+                <div class="data-label">💧 ความชื้น</div>
+                <div class="data-value val-humid" id="bin2-humid">-- %</div>
+            </div>
+        </div>
+
+        <div class="bin-card" id="card-3">
+            <div class="card-header">
+                <h2 class="card-title">ถังที่ 3</h2>
+                <div class="card-status" id="bin3-status">📡 Status: NORMAL</div>
+            </div>
+            <div class="data-row">
+                <div class="data-label">🗑️ ปริมาณขยะ</div>
+            </div>
+            <div class="level-container">
+                <div class="level-text" id="bin3-level-txt">--%</div>
+                <div class="progress-bg"><div class="progress-fill" id="bin3-bar"></div></div>
+                <div style="color: var(--text-muted);">%</div>
+            </div>
+            <div class="data-row">
+                <div class="data-label">🌡️ อุณหภูมิ</div>
+                <div class="data-value val-temp" id="bin3-temp">-- °C</div>
+            </div>
+            <div class="data-row">
+                <div class="data-label">💧 ความชื้น</div>
+                <div class="data-value val-humid" id="bin3-humid">-- %</div>
+            </div>
+        </div>
+
+        <div class="bin-card" id="card-4">
+            <div class="card-header">
+                <h2 class="card-title">ถังที่ 4</h2>
+                <div class="card-status" id="bin4-status">📡 Status: NORMAL</div>
+            </div>
+            <div class="data-row">
+                <div class="data-label">🗑️ ปริมาณขยะ</div>
+            </div>
+            <div class="level-container">
+                <div class="level-text" id="bin4-level-txt">--%</div>
+                <div class="progress-bg"><div class="progress-fill" id="bin4-bar"></div></div>
+                <div style="color: var(--text-muted);">%</div>
+            </div>
+            <div class="data-row">
+                <div class="data-label">🌡️ อุณหภูมิ</div>
+                <div class="data-value val-temp" id="bin4-temp">-- °C</div>
+            </div>
+            <div class="data-row">
+                <div class="data-label">💧 ความชื้น</div>
+                <div class="data-value val-humid" id="bin4-humid">-- %</div>
+            </div>
+        </div>
+
+    </div>
+
+    <div class="logs-section">
+        <div class="logs-title">System Logs (Real-time)</div>
+        <div class="log-box" id="log-box"></div>
+    </div>
+
+    <script>
+        var clientId = "WebGUI-" + Math.floor(Math.random() * 10000);
+        var client = new Paho.MQTT.Client("broker.hivemq.com", 8884, "/mqtt", clientId);
+
+        client.onConnectionLost = function(responseObject) {
+            document.getElementById("conn-status").innerText = "🔴";
+            addLog("🔴 Connection Lost: " + responseObject.errorMessage, "");
+        };
+
+        client.onMessageArrived = function(message) {
+            var topic = message.destinationName;
+            var payload = message.payloadString;
+            var now = new Date().toLocaleTimeString('th-TH');
+            var parts = topic.split('/'); 
+            
+            // รอรับ Topic: smartbin/fleet/1/level เป็นต้น
+            if (parts.length === 4) {
+                var binId = parts[2];
+                var type = parts[3];
+
+                if (type === "level") {
+                    var lvl = parseInt(payload);
+                    document.getElementById("bin" + binId + "-level-txt").innerText = lvl + "%";
+                    
+                    var bar = document.getElementById("bin" + binId + "-bar");
+                    bar.style.width = lvl + "%";
+                    
+                    // เปลี่ยนสีหลอดถ้าเต็ม
+                    if (lvl >= 80) bar.classList.add("fill-danger");
+                    else bar.classList.remove("fill-danger");
+                }
+                else if (type === "temp") {
+                    document.getElementById("bin" + binId + "-temp").innerText = parseFloat(payload).toFixed(1) + " °C";
+                }
+                else if (type === "humidity") {
+                    document.getElementById("bin" + binId + "-humid").innerText = parseFloat(payload).toFixed(1) + " %";
+                }
+                else if (type === "alert" && payload === "FULL") {
+                    var st = document.getElementById("bin" + binId + "-status");
+                    st.innerText = "🚨 Status: FULL (รอเคลียร์)";
+                    st.className = "card-status status-alert";
+                    addLog(`[${now}] 🚨 ALERT: ถังขยะใบที่ ${binId} เต็ม 100%!`, "log-alert");
+                }
+                else if (type === "worker") {
+                    var st = document.getElementById("bin" + binId + "-status");
+                    st.innerText = "📡 Status: NORMAL";
+                    st.className = "card-status";
+                    addLog(`[${now}] 👷 Worker: ${payload} (เคลียร์ถัง ${binId})`, "log-worker");
+                }
+            }
+        };
+
+        var options = {
+            timeout: 3,
+            useSSL: true,
+            onSuccess: function() {
+                document.getElementById("conn-status").innerText = "🟢";
+                client.subscribe("smartbin/fleet/#");
+                addLog("เชื่อมต่อ MQTT Broker (Secure) สำเร็จ รอรับข้อมูล...", "");
+            },
+            onFailure: function() {
+                document.getElementById("conn-status").innerText = "🔴";
+            }
+        };
+
+        client.connect(options);
+
+        function addLog(text, className) {
+            var logBox = document.getElementById("log-box");
+            logBox.innerHTML += `<div class="${className}">${text}</div>`;
+            logBox.scrollTop = logBox.scrollHeight;
+        }
+    </script>
+</body>
+</html>
