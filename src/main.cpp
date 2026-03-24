@@ -1,171 +1,268 @@
 #include <Arduino.h>
-#include <TFT_eSPI.h> 
 #include <WiFi.h>
-#include <PubSubClient.h> // 🚨 ไลบรารี MQTT
-#include "secrets.h"
+#include <PubSubClient.h>
+#include <SPI.h>
+#include <Wire.h> // --- เพิ่ม Library สำหรับ I2C ---
+#include <MFRC522.h>
+#include <secrets.h>
 
-TFT_eSPI tft = TFT_eSPI(); 
+// --- Library จอ ST7789 ---
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7789.h> 
 
-#define PIN_TRIG  12  
-#define PIN_ECHO  14  
+// --- Library เซนเซอร์ AHT20 & BMP280 ---
+#include <Adafruit_AHTX0.h>
+#include <Adafruit_BMP280.h>
 
-const float BIN_EMPTY_CM = 40.0;
-const float BIN_FULL_CM = 8.0;
-
-// === 🚨 ข้อมูล WiFi ===
-// 🚨 ดึงค่าจาก secrets.h มาใช้
-const char* ssid = SECRET_WIFI_SSID;        
+// ---------------- ตั้งค่า WiFi & MQTT ----------------
+const char* ssid = SECRET_WIFI_SSID;
 const char* password = SECRET_WIFI_PASS;
-
-// === 🚨 ข้อมูล MQTT Broker (ใช้ของฟรี HiveMQ) ===
 const char* mqtt_server = "broker.hivemq.com";
 const int mqtt_port = 1883;
-// หัวข้อ (Topic) ที่เราจะส่งข้อมูลไป (ตั้งชื่อให้ไม่ซ้ำกับคนอื่นในโลก)
-const char* mqtt_topic = "arsu/smartbin/zoneA"; 
 
 WiFiClient espClient;
 PubSubClient client(espClient);
 
-unsigned long lastUpdate = 0;
+// ---------------- ตั้งค่า PIN ----------------
+#define TRIG_PIN 32
+#define ECHO_PIN 33
+#define BUZZER_PIN 14
+#define RFID_SS_PIN 5
+#define RFID_RST_PIN 27
 
-// ฟังก์ชันสำหรับเชื่อมต่อ MQTT อัตโนมัติเวลาหลุด
+// --- ขาของจอ TFT ---
+#define TFT_CS   15
+#define TFT_DC   2
+#define TFT_RST  4
+
+// --- ขา I2C ที่เราย้ายใหม่ ---
+#define I2C_SDA 25
+#define I2C_SCL 26
+
+// ---------------- ตัวแปรระบบ ----------------
+MFRC522 mfrc522(RFID_SS_PIN, RFID_RST_PIN);
+Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
+
+// สร้าง Object สำหรับเซนเซอร์
+Adafruit_AHTX0 aht;
+Adafruit_BMP280 bmp;
+
+String knownCard = "c6 fb 34 06"; 
+bool isBinFull = false;
+unsigned long lastMeasureTime = 0;
+
+void beep(int times, int duration) {
+  for (int i = 0; i < times; i++) {
+    digitalWrite(BUZZER_PIN, LOW);
+    delay(duration);
+    digitalWrite(BUZZER_PIN, HIGH);
+    delay(100);
+  }
+}
+
+void setup_wifi() {
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) { delay(500); }
+}
+
 void reconnect() {
   while (!client.connected()) {
-    Serial.print("Attempting MQTT connection...");
-    // สร้างชื่อ Client ID แบบสุ่มให้ ESP32
-    String clientId = "ESP32Client-SmartBin";
-    
-    if (client.connect(clientId.c_str())) {
-      Serial.println("connected");
-    } else {
-      Serial.print("failed, rc=");
-      Serial.print(client.state());
-      Serial.println(" try again in 5 seconds");
-      delay(5000);
-    }
+    String clientId = "SmartBin-ESP32-" + String(random(0xffff), HEX);
+    if (client.connect(clientId.c_str())) { } 
+    else { delay(5000); }
   }
 }
 
 void setup() {
   Serial.begin(115200);
-  delay(300);
   
-  pinMode(PIN_TRIG, OUTPUT);
-  pinMode(PIN_ECHO, INPUT);
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, HIGH);
+  
+  // --- 1. เริ่มต้น I2C ที่ขา 25, 26 ---
+  Wire.begin(I2C_SDA, I2C_SCL);
 
-  tft.begin();
+  // --- 2. เริ่มต้นจอ TFT ---
+  tft.init(240, 320); 
   tft.setRotation(1); 
-  tft.fillScreen(TFT_BLACK);
-  tft.setTextColor(TFT_CYAN);
-  tft.setTextSize(3);
-  tft.setCursor(10, 20);
-  tft.println("SMART WASTE BIN");
-
+  tft.fillScreen(ST77XX_BLACK); 
+  tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK); 
   tft.setTextSize(2);
-  tft.setTextColor(TFT_YELLOW);
-  tft.setCursor(10, 80);
-  tft.print("Connecting WiFi...");
+  tft.setCursor(40, 110);
+  tft.println("System Starting...");
+
+  setup_wifi();
+  client.setServer(mqtt_server, mqtt_port);
   
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
+  SPI.begin(); 
+  mfrc522.PCD_Init(); 
+
+  // --- 3. เริ่มต้น AHT & BMP280 ---
+  if (!aht.begin()) {
+    Serial.println("❌ หาเซนเซอร์ AHT ไม่เจอ!");
+  }
+  // โมดูลรวมแบบนี้ BMP280 มักจะใช้ Address 0x76 (ถ้าไม่ได้ให้แก้เป็น 0x77)
+  if (!bmp.begin(0x76)) {
+    Serial.println("❌ หาเซนเซอร์ BMP280 ไม่เจอ!");
   }
   
-  tft.fillRect(0, 60, 320, 180, TFT_BLACK); 
-  tft.drawLine(10, 60, 310, 60, TFT_WHITE);
-  tft.setTextColor(TFT_GREEN);
-  tft.setCursor(10, 75);
-  tft.print("WiFi Connected!");
-
-  // ตั้งค่า MQTT Server
-  client.setServer(mqtt_server, mqtt_port);
+  tft.fillScreen(ST77XX_BLUE); 
+  tft.setCursor(50, 110);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.println("Smart Bin Ready!");
+  
+  beep(2, 100); 
 }
 
 void loop() {
-  // รักษาการเชื่อมต่อ MQTT ไว้ตลอดเวลา
-  if (!client.connected()) {
-    reconnect();
-  }
+  if (!client.connected()) { reconnect(); }
   client.loop();
 
-  // อัปเดตข้อมูลทุกๆ 2 วินาที (ไม่ควรส่งถี่เกินไปเดี๋ยว Broker เตะออก)
-  if (millis() - lastUpdate > 2000) { 
-    lastUpdate = millis();
-
-    float totalDistance = 0;
-    int validReads = 0;
-
-    for (int i = 0; i < 3; i++) {
-      digitalWrite(PIN_TRIG, LOW);
-      delayMicroseconds(2);
-      digitalWrite(PIN_TRIG, HIGH);
-      delayMicroseconds(10);
-      digitalWrite(PIN_TRIG, LOW);
-
-      long duration = pulseIn(PIN_ECHO, HIGH, 30000); 
-      if (duration > 0) {
-        float dist = (duration * 0.0343) / 2.0;
-        if (dist > 0 && dist < 400) { 
-          totalDistance += dist;
-          validReads++;
-        }
-      }
-      delay(10);
-    }
-
-    float distanceCm = BIN_EMPTY_CM; 
-    if (validReads > 0) {
-      distanceCm = totalDistance / validReads;
-    }
-
-    int percent = 0;
-    if (distanceCm >= BIN_EMPTY_CM) {
-      percent = 0;
-    } else if (distanceCm <= BIN_FULL_CM) {
-      percent = 100;
-    } else {
-      percent = map(distanceCm, BIN_EMPTY_CM, BIN_FULL_CM, 0, 100);
-    }
-    percent = constrain(percent, 0, 100);
-
-    // สร้างสถานะข้อความ
-    String statusMsg = (percent >= 80) ? "FULL" : "NORMAL";
-
-    // --- 🚨 สร้างข้อมูลแบบ JSON และส่งขึ้น MQTT ---
-    String jsonPayload = "{";
-    jsonPayload += "\"percent\": " + String(percent) + ", ";
-    jsonPayload += "\"distance_cm\": " + String(distanceCm, 1) + ", ";
-    jsonPayload += "\"status\": \"" + statusMsg + "\"";
-    jsonPayload += "}";
-
-    // ส่งข้อความไปที่ Topic
-    client.publish(mqtt_topic, jsonPayload.c_str());
-    Serial.println("Published: " + jsonPayload);
-
-    // --- อัปเดตหน้าจอ TFT ให้เราดูด้วย ---
-    tft.fillRect(0, 110, 320, 130, TFT_BLACK); 
+  // 1. ตรวจสอบข้อมูลทุก 5 วินาที
+  if (millis() - lastMeasureTime > 5000) {
+    lastMeasureTime = millis();
     
-    tft.setTextColor(TFT_WHITE, TFT_BLACK); 
-    tft.setTextSize(5); 
-    char percentStr[10];
-    sprintf(percentStr, "%3d %%", percent); 
-    tft.setCursor(10, 115);
-    tft.print(percentStr);
+    // --- อ่านค่าขยะ ---
+    digitalWrite(TRIG_PIN, LOW); delayMicroseconds(2);
+    digitalWrite(TRIG_PIN, HIGH); delayMicroseconds(10);
+    digitalWrite(TRIG_PIN, LOW);
+    long duration = pulseIn(ECHO_PIN, HIGH);
+    int distance = duration * 0.034 / 2;
+    int percent = constrain(map(distance, 30, 5, 0, 100), 0, 100);
+    
+    // --- อ่านค่าอุณหภูมิและความชื้น ---
+    sensors_event_t humidity, temp;
+    aht.getEvent(&humidity, &temp);
+    float t = temp.temperature;
+    float h = humidity.relative_humidity;
+    float p = bmp.readPressure() / 100.0F; // ความดัน (hPa)
+    
+    // --- ส่งข้อมูลขึ้น MQTT แบบเหมาเข่ง ---
+    client.publish("smartbin/level", String(percent).c_str());
+    client.publish("smartbin/temp", String(t).c_str());
+    client.publish("smartbin/humidity", String(h).c_str());
 
-    tft.setTextSize(2);
-    tft.setTextColor(TFT_ORANGE, TFT_BLACK);
-    tft.setCursor(10, 165);
-    tft.printf("Distance: %5.1f cm", distanceCm); 
+    // --- อัปเดตหน้าจอสถานะปกติ (แนวนอน) ---
+    if (!isBinFull) {
+      tft.fillScreen(ST77XX_BLACK); 
+      
+      tft.setTextSize(2);
+      tft.setTextColor(ST77XX_WHITE);
+      tft.setCursor(60, 15); 
+      tft.println("SMART BIN SYSTEM");
+      tft.drawFastHLine(10, 40, 300, ST77XX_WHITE); 
 
-    tft.setTextSize(2);
-    tft.setCursor(10, 205);
-    if (percent >= 80) {
-      tft.setTextColor(TFT_RED, TFT_BLACK);
-      tft.print("STATUS: FULL!              ");
-    } else {
-      tft.setTextColor(TFT_GREEN, TFT_BLACK);
-      tft.print("STATUS: Normal             "); 
+      // หลอดขยะ
+      int barX = 20;      
+      int barY = 60;      
+      int barWidth = 60;  
+      int barHeight = 150; 
+      int fillHeight = map(percent, 0, 100, 0, barHeight);
+
+      uint16_t barColor;
+      if (percent < 50) barColor = ST77XX_GREEN;
+      else if (percent < 80) barColor = ST77XX_ORANGE;
+      else barColor = ST77XX_RED;
+
+      tft.drawRect(barX, barY, barWidth, barHeight, ST77XX_WHITE); 
+      tft.fillRect(barX + 2, barY + barHeight - fillHeight + 2, barWidth - 4, fillHeight - 4, barColor);
+
+      // % ขยะ
+      tft.setTextSize(5); 
+      tft.setTextColor(barColor);
+      tft.setCursor(110, 60);
+      tft.print(percent);
+      tft.println("%");
+
+      // ระยะทาง ขยับขึ้นมานิดหน่อย
+      tft.setTextSize(2);
+      tft.setTextColor(ST77XX_WHITE);
+      tft.setCursor(110, 120);
+      tft.print("Dist : ");
+      tft.setTextColor(ST77XX_CYAN);
+      tft.print(distance);
+      tft.println(" cm");
+
+      // สถานะ
+      tft.setTextColor(ST77XX_WHITE);
+      tft.setCursor(110, 150);
+      tft.print("Stat : ");
+      tft.setTextColor(ST77XX_GREEN);
+      tft.println("NORMAL");
+      
+      // 🔽 แสดงอุณหภูมิและความชื้น 🔽
+      tft.setTextColor(ST77XX_WHITE);
+      tft.setCursor(110, 180);
+      tft.print("Temp : ");
+      tft.setTextColor(ST77XX_YELLOW);
+      tft.print(t, 1); // โชว์ทศนิยม 1 ตำแหน่ง
+      tft.println(" C");
+      
+      tft.setTextColor(ST77XX_WHITE);
+      tft.setCursor(110, 210);
+      tft.print("Humid: ");
+      tft.setTextColor(ST77XX_ORANGE);
+      tft.print(h, 1);
+      tft.println(" %");
     }
+
+    if (percent > 80 && !isBinFull) {
+      isBinFull = true;
+      client.publish("smartbin/alert", "FULL"); 
+      
+      tft.fillScreen(ST77XX_RED);
+      tft.setTextColor(ST77XX_WHITE);
+      tft.setTextSize(5);
+      tft.setCursor(40, 70);
+      tft.println("BIN FULL");
+      
+      tft.setTextSize(2);
+      tft.setTextColor(ST77XX_YELLOW);
+      tft.setCursor(70, 150);
+      tft.println("Tap RFID Card");
+      
+      beep(3, 200); 
+    }
+  }
+
+  // 2. ระบบ RFID รอรับการยืนยันตัวตน (เหมือนเดิมเป๊ะ)
+  if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()) {
+    String cardUID = "";
+    for (byte i = 0; i < mfrc522.uid.size; i++) {
+      cardUID += String(mfrc522.uid.uidByte[i] < 0x10 ? " 0" : " ");
+      cardUID += String(mfrc522.uid.uidByte[i], HEX);
+    }
+    cardUID.trim(); 
+
+    if (cardUID.equalsIgnoreCase(knownCard)) {
+      client.publish("smartbin/worker", "Arsu Maehae acknowledged the task");
+      isBinFull = false; 
+      
+      tft.fillScreen(ST77XX_GREEN);
+      tft.setTextColor(ST77XX_BLACK);
+      tft.setTextSize(4);
+      tft.setCursor(65, 80);
+      tft.println("GRANTED");
+      
+      tft.setTextSize(2);
+      tft.setCursor(60, 150);
+      tft.println("Worker: Arsu M.");
+      
+      beep(1, 400); 
+      delay(3000); 
+      
+    } else {
+      tft.fillScreen(ST77XX_ORANGE);
+      tft.setTextColor(ST77XX_BLACK);
+      tft.setTextSize(4);
+      tft.setCursor(80, 100);
+      tft.println("DENIED");
+      
+      beep(3, 80); 
+      delay(2000);
+    }
+    mfrc522.PICC_HaltA(); 
   }
 }

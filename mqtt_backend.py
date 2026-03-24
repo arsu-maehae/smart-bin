@@ -52,6 +52,10 @@ def on_message(client, userdata, msg):
     
     print(f"📥 ระดับขยะ: {percent}% | สถานะ: {status}")
     
+    # 👈 1. เพิ่มโค้ดส่วนนี้ เพื่อเซฟข้อมูลล่าสุดลงไฟล์ JSON (ใช้เป็นฐานข้อมูลชั่วคราว)
+    with open("latest_data.json", "w") as f:
+        json.dump(data, f)
+    
     # === สร้างความฉลาด (Logic) ไว้ที่นี่ ===
     if status == "FULL":
         if not is_line_notified:
